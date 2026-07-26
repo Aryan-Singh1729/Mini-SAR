@@ -545,3 +545,277 @@ At this point, the project has a validated, imported SQLite dataset and an empty
 - audit-event writing or human review endpoints.
 
 Those responsibilities begin in Phase 3 and later phases. Keeping them out of Phases 1–2 makes the foundation explainable: first understand data, then model it, then import and validate it, and only then build the investigation behavior.
+
+---
+
+## Phase 3 — Controlled database tools and deterministic AML signals
+
+### Goal
+
+Create the only approved path from investigation logic to the SQLite database. The tools fetch limited evidence with parameterized SQL and calculate risk pre-signals in Python. They do not expose general SQL, do not return unlimited raw records, and do not ask an LLM to perform arithmetic.
+
+### Why controlled tools matter
+
+The desired security/data-flow boundary is:
+
+```text
+Future LLM / LangGraph agent
+    ↓ asks for one named tool
+Controlled Python tool
+    ↓ parameterized, fixed SQL query
+SQLite database
+    ↓ bounded evidence JSON
+Controlled Python tool
+    ↓ deterministic calculations already completed
+Future LLM / LangGraph agent
+    ↓ interprets evidence, never queries the database directly
+```
+
+The LLM layer is intentionally not built in this phase. Phase 3 establishes correct Python capabilities first; Phase 5 will wrap these approved functions as LangChain tools for LangGraph.
+
+### Files created
+
+| File | Responsibility |
+| --- | --- |
+| `app/tools/common.py` | Shared safe customer lookup, date parsing, missing-customer response helpers. |
+| `app/tools/customer_tools.py` | `get_customer_profile(customer_id)`. |
+| `app/tools/account_tools.py` | `get_account_summary(customer_id)`. |
+| `app/tools/transaction_tools.py` | `get_transaction_history(customer_id, observation_start, observation_end)` and deterministic AML calculations. |
+| `app/tools/alert_tools.py` | `get_prior_alert_history(customer_id)`. |
+| `app/tools/watchlist_tools.py` | `screen_watchlist(customer_id)`. |
+
+### Shared safety behavior
+
+All tools:
+
+- use `app.database.get_connection()`, which enables SQLite foreign keys;
+- use bound parameters such as `WHERE customer_id = ?`, never SQL built from an input value;
+- return ordinary JSON-ready dictionaries, making later audit logging straightforward;
+- return a safe `found: false` result for an unknown customer instead of exposing an exception or arbitrary query path;
+- support an optional `database_path` only for isolated testing; the future LLM-facing interface will not expose database-path control.
+
+### Tool 1 — `get_customer_profile(customer_id)`
+
+This tool returns the bounded customer/KYC fields needed for investigation:
+
+```text
+occupation, employer_name, declared annual income, declared source of funds,
+KYC status/review/expiry, PEP flag, sanctions flag, risk rating,
+country of residence, address country
+```
+
+It intentionally does **not** return date of birth, detailed address, or every customer column. Those fields are sensitive and are not necessary for the planned AML signals.
+
+Data flow:
+
+```text
+customer_id → SELECT named columns FROM customers WHERE customer_id = ? → profile JSON
+```
+
+### Tool 2 — `get_account_summary(customer_id)`
+
+This tool returns all accounts for one known customer, but omits the sensitive IBAN because it is not needed for the mini investigation.
+
+For every account it calculates:
+
+```text
+days_since_last_activity = reference date − last_activity_date
+```
+
+The optional `as_of_date` exists for reproducible tests. If omitted, the tool uses the current date. If source activity appears later than the reference date, the result is capped at zero rather than producing a misleading negative number.
+
+Returned account evidence includes:
+
+```text
+account ID, account type, currency, account status, opening date,
+last activity date, average monthly balance, days since last activity
+```
+
+### Tool 3 — `get_transaction_history(customer_id, observation_start, observation_end)`
+
+This is the core deterministic AML tool. It requires an explicit ISO date window (`YYYY-MM-DD`) because Phase 2A showed that the dataset does not contain ready-made observation-window columns.
+
+The SQL query:
+
+- joins `transactions` to `accounts` to obtain the customer relationship;
+- filters to the selected customer;
+- filters to `COMPLETED` transactions;
+- filters to the requested time range;
+- orders results by transaction time;
+- never returns unlimited raw history to the future LLM.
+
+#### Summary calculations
+
+```text
+total_credits       = sum of CREDIT amounts in the window
+total_debits        = sum of DEBIT amounts in the window
+transaction_count   = count of completed transactions in the window
+net_retained_amount = max(total_credits − total_debits, 0)
+retention_ratio     = net_retained_amount / total_credits
+```
+
+The retention ratio is a window-based movement indicator. It is **not** called an account balance because the source dataset contains average monthly balance, not a current balance.
+
+#### Rule 1 pre-signal — structuring/repeated near-threshold credits
+
+The policy constants are explicit Python values:
+
+```text
+Reporting threshold:                 £10,000
+Near-threshold range:                £8,000 to less than £10,000
+Rolling observation period:          7 days
+Minimum near-threshold credit count: 3
+```
+
+The tool finds credits in that range and searches for the largest seven-day rolling window. It returns:
+
+- Boolean `structuring_presignal`;
+- candidate count and largest rolling-window count;
+- relevant transaction IDs and amounts;
+- the exact thresholds used.
+
+This is a pre-signal, not a conclusion. The LLM later explains the pattern and considers any benign evidence.
+
+#### Rule 2 pre-signal — rapid movement of funds
+
+The tool compares credits and later debits on the same account.
+
+A rapid-outflow pair is defined as:
+
+```text
+debit occurs within 2 days after a credit
+and debit amount is at least 80% of the credit amount
+```
+
+It returns a Boolean, pair count, up to five evidence pairs, time between the movements, counterparty name, and relevant transaction IDs.
+
+#### Rule 3 pre-signal — income mismatch
+
+The tool retrieves the customer’s declared annual income and compares it with credits in the selected window.
+
+```text
+income_mismatch = total credits >= 50% of declared annual income
+```
+
+It returns the declared income, credit-to-income ratio, threshold, and Boolean result. This is deliberately deterministic and transparent. It is not evidence of crime on its own: declared income may be incomplete, outdated, or not representative of legitimate wealth.
+
+#### Bounded important transactions
+
+The tool selects at most twelve transactions:
+
+1. signal-linked structuring transactions first;
+2. signal-linked rapid-outflow transactions next;
+3. highest-value remaining transactions until the cap is reached.
+
+The returned record includes only relevant evidence fields such as transaction ID, account, time, direction, GBP amount, counterparty, country, channel, cross-border/high-risk flags, and status. It excludes unlimited raw transaction history and payment narratives.
+
+### Tool 4 — `get_prior_alert_history(customer_id)`
+
+This tool retrieves at most ten prior alerts in reverse chronological order. It returns:
+
+- historical alert ID/date/type/rules;
+- prior disposition;
+- SAR filed flag/reference;
+- prior analyst notes;
+- an explicit `sar_previously_filed` Boolean;
+- a separate `false_positive_context` list for earlier false-positive notes.
+
+Why it matters: a large transaction or repeated alert is not automatically suspicious. Previous legitimate explanations and prior dispositions must be considered by the final investigator reasoning.
+
+### Tool 5 — `screen_watchlist(customer_id)`
+
+This tool screens the customer name and every distinct counterparty name associated with that customer. It does not return all counterparties; it returns only bounded matches.
+
+Matching methods:
+
+| Method | Rule |
+| --- | --- |
+| `exact` | Normalized candidate name equals normalized `entity_name`. |
+| `alias` | Normalized candidate name equals a normalized alias. Pipe and semicolon-separated aliases are supported. |
+| `fuzzy_token_jaccard` | Token-set Jaccard similarity is at least `0.60`. |
+
+Name normalization lowercases text, removes punctuation, and compares alphanumeric name tokens. Exact and alias matches receive a score of `1.0`; fuzzy matches return their actual Jaccard score.
+
+The tool screens only `ACTIVE` and `UNDER_REVIEW` watchlist records, sorts stronger/riskier matches first, and returns at most ten matches. A fuzzy match is explicitly called **proximity**, not a confirmed sanctions hit.
+
+### Error handling
+
+Examples of safe boundary results:
+
+```json
+{
+  "customer_id": "CUST-NOT-FOUND",
+  "found": false,
+  "message": "No customer exists for the supplied customer_id."
+}
+```
+
+```json
+{
+  "customer_id": "CUST-UK-050012",
+  "found": false,
+  "error": "observation_start must be on or before observation_end."
+}
+```
+
+The future graph can log and interpret these structured failures without exposing stack traces or database internals.
+
+### Phase 3 test results
+
+The tools were run against the imported SQLite dataset with a fixed test window.
+
+```text
+Customer profile: found, LOW risk, VERIFIED KYC
+Account summary: 1 account; 27 days since last activity as of 2024-12-01
+Transaction window: 93 transactions
+Credits: £75,000.00
+Debits: £20,955.73
+Retention ratio: 0.7206
+Income mismatch: true
+Important transaction records returned: 12
+Prior alerts returned: 1
+Prior SAR filed: false
+```
+
+The safety and screening tests also passed:
+
+```text
+Unknown customer → safe found:false response
+Invalid date window → safe validation error
+Retained watchlist case → one alias match returned
+```
+
+### How to test Phase 3
+
+From `C:\Users\hp\Desktop\mini-SAR\mini-sar`:
+
+```powershell
+python -m compileall app
+```
+
+Expected result: all modules under `app/tools/` compile successfully.
+
+Then run a reproducible smoke test:
+
+```powershell
+@'
+from app.tools.account_tools import get_account_summary
+from app.tools.alert_tools import get_prior_alert_history
+from app.tools.customer_tools import get_customer_profile
+from app.tools.transaction_tools import get_transaction_history
+from app.tools.watchlist_tools import screen_watchlist
+
+customer_id = "CUST-UK-050012"
+print(get_customer_profile(customer_id))
+print(get_account_summary(customer_id, as_of_date="2024-12-01"))
+print(get_transaction_history(customer_id, "2024-01-01", "2024-12-31"))
+print(get_prior_alert_history(customer_id))
+print(screen_watchlist(customer_id))
+'@ | python -
+```
+
+Expected result: five JSON-ready dictionaries; transaction output must contain no more than twelve `important_transactions`.
+
+### Interview explanation
+
+> “I gave the future agent five narrowly scoped Python tools rather than database access. Each tool uses fixed, parameterized SQL and returns bounded evidence. Risk signals such as structuring, rapid movement, and income mismatch are deterministic Python calculations with documented thresholds. The LLM will only interpret those outputs, which reduces hallucination and makes every conclusion auditable.”
