@@ -1,0 +1,19 @@
+# Local configuration and credentials
+.env
+
+# Python tooling
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Runtime data and investigation outputs
+data/*.db
+audit/evidence_logs/*.json
+audit/sar_drafts/*
+
+# Keep the required runtime directories in Git.
+!data/.gitkeep
+!audit/evidence_logs/.gitkeep
+!audit/sar_drafts/.gitkeep
