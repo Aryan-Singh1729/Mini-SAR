@@ -8,6 +8,10 @@ Completed phases:
 2. Phase 2A — Dataset understanding and data dictionary
 3. Phase 2B — SQLite schema design from the actual dataset
 4. Phase 2C — CSV import pipeline and validation
+5. Phase 3 — Database helpers and controlled AML tools
+6. Phase 4 — Audit logger and evidence package
+7. Phase 5 — LangChain and LangGraph investigation agent
+8. Phase 5 setup correction — Groq configuration and VS Code imports
 
 The project intentionally has no generated AML customers, transactions, alerts, or watchlist entries. It is built around the CSV data supplied by the project owner.
 
@@ -76,7 +80,8 @@ This file lists packages the project will need. It does not install them itself.
 | `pydantic` | Validates request data and final structured verdicts. |
 | `langchain` | Standard LLM message and tool abstractions. |
 | `langgraph` | Explicit agent/tool state machine. |
-| `langchain-openai` | LangChain connection to an OpenAI model in the later agent phase. |
+| `langchain-core` | Message and tool interfaces imported directly by the application. |
+| `langchain-groq` | Groq-specific LangChain `ChatGroq` adapter used by the agent. |
 | `python-dotenv` | Loads local configuration from `.env`. |
 | `pandas`, `openpyxl` | Available for future CSV/Excel support; the fixed CSV importer currently uses Python's standard `csv` module. |
 
@@ -87,8 +92,9 @@ The version bounds, for example `fastapi>=0.115,<1.0`, allow compatible upgrades
 `.env.example` is a safe template. It contains placeholders such as:
 
 ```env
-OPENAI_API_KEY=
-OPENAI_MODEL=gpt-4.1-mini
+LLM_PROVIDER=groq
+GROQ_API_KEY=your_groq_api_key
+GROQ_MODEL=llama-3.1-8b-instant
 DATABASE_PATH=data/aml.db
 DATASET_PATH=
 EVIDENCE_LOG_DIR=audit/evidence_logs
@@ -913,3 +919,345 @@ Expected result: `audit_logger.py` and `evidence_builder.py` compile. A repeat l
 ### Interview explanation
 
 > “Every investigation receives a durable run record and ordered audit events. I store safe operational evidence rather than hidden model reasoning. Once complete, the system atomically writes an evidence package containing the original alert, actual tool outputs, final verdict, false-positive factors, and chronology, so an auditor can reconstruct what happened.”
+---
+
+## Phase 5 — LangChain and LangGraph investigation agent
+
+### Goal
+
+Phase 5 connects the evidence tools to a controlled model loop. The model decides which allow-listed tool is needed next and interprets its bounded result, while Python enforces tool scope, deterministic calculations, stopping limits, verdict validation, and audit-safe events.
+
+### Files created or updated
+
+| File | Purpose |
+| --- | --- |
+| `app/agent/state.py` | Typed LangGraph state plus Pydantic verdict/evidence schemas. |
+| `app/agent/prompts.py` | Evidence, tool-use, checkpoint, and final-output rules. |
+| `app/agent/llm.py` | Environment-based, Groq-only `ChatGroq` configuration and tool binding. |
+| `app/agent/graph.py` | LangChain wrappers, `agent_node`, `tools_node`, conditional routing, and graph compilation. |
+| `.env.example` | Groq provider/key/model placeholders plus iteration and recursion limits. |
+| `requirements.txt` | Version ranges aligned with installed LangChain 1.x and LangGraph 1.x. |
+
+### Architecture
+
+```text
+START
+  -> agent_node
+       -> one valid tool call -> tools_node
+              -> parameterized Python tool
+              -> ToolMessage + audit-safe events
+              -> agent_node
+       -> valid FinalVerdict -> END
+```
+
+LangGraph is useful here because state, node responsibilities, looping, and the terminal condition are explicit. The graph cannot silently invoke an arbitrary function or stop with an unvalidated text answer.
+
+### State design
+
+`InvestigationState` contains:
+
+```text
+messages             reducer-managed LangChain message history
+alert                original submitted alert
+customer_id          fixed investigation scope
+investigation_id     audit correlation ID
+tool_results         executed tool arguments and results
+audit_event_queue    ordered events later streamed by SSE
+final_verdict        validated terminal verdict or null
+system_prompt_logged whether prompt setup was already audited
+agent_iterations     explicit model-call counter
+```
+
+The `messages` field uses LangGraph's `add_messages` reducer, so each node returns only new messages and LangGraph appends them correctly. The audit queue uses list addition for the same reason.
+
+### Structured verdict validation
+
+Pydantic models define the terminal contract:
+
+```text
+FinalVerdict
+  verdict: TRUE_POSITIVE or FALSE_POSITIVE
+  confidence: 0 to 1
+  rules_triggered: only RULE-01 through RULE-04
+  key_evidence[]
+    rule_mapped
+    finding
+    supporting_data
+      amounts[]
+      transaction_ids[]
+      counterparties[]
+      source_table
+    statistical_context
+  false_positive_factors_considered[]
+  final_reasoning
+```
+
+Extra fields are forbidden. A malformed verdict, invalid confidence, or unknown rule is rejected rather than saved as a result.
+
+### Prompt design
+
+The system prompt requires the model to:
+
+- use only the submitted alert and returned tool evidence;
+- never invent records, amounts, names, dates, watchlist hits, or analyst notes;
+- never write SQL or request direct database access;
+- interpret Python-computed pre-signals without replacing their thresholds;
+- distinguish fuzzy proximity from confirmed watchlist matching;
+- consider prior false-positive context;
+- produce concise visible summaries rather than chain-of-thought;
+- request no more than one tool per turn and never repeat a completed call.
+
+Before the first tool, content must include `INITIAL HYPOTHESIS` and `NEXT STEP`. When another tool is needed after a result, content must include `ANALYSIS SUMMARY`, `UPDATED HYPOTHESIS`, and `NEXT STEP`. When the model finalizes immediately after a tool, the graph creates a safe final `analysis_summary` event from the validated `final_reasoning` before emitting the verdict.
+
+### LangChain tool wrappers
+
+The model sees exactly five wrapper schemas:
+
+```text
+get_customer_profile(customer_id)
+get_account_summary(customer_id)
+get_transaction_history(customer_id, observation_start, observation_end)
+get_prior_alert_history(customer_id)
+screen_watchlist(customer_id)
+```
+
+Internal testing parameters such as `database_path` and `as_of_date` are not exposed. The wrappers call the Phase 3 Python functions; therefore the model still has no SQL interface.
+
+### Model configuration
+
+The Phase 5 configuration was corrected to use Groq only. `build_bound_model()`
+creates `ChatGroq` with:
+
+```text
+model name read from GROQ_MODEL
+API key read from GROQ_API_KEY
+five allow-listed local tools
+parallel tool calls disabled
+temperature 0 for lower output variability
+60-second request timeout
+two transient retries
+```
+
+`LLM_PROVIDER` is also read from `.env` and must equal `groq`. No model name is
+hardcoded in Python, and no fallback silently chooses a model. This matters
+because model availability can differ by Groq account and change over time.
+
+Provider-native strict structured output is not combined with tool use here.
+Groq documents that structured-output support varies by model and that strict
+structured outputs cannot currently be combined with tool use. The graph
+therefore uses ordinary Groq tool calling while investigating; its final prompt
+requires JSON, and `_extract_final_verdict()` validates the terminal JSON with
+the Pydantic `FinalVerdict` schema before the graph may end.
+
+The API key is stored in the frozen `LLMSettings` object with `repr=False`, so
+printing the settings object does not reveal the credential.
+
+### Why the graph limits are loaded separately
+
+`load_llm_settings()` requires the Groq provider, key, and model because it is
+used for a live model. `load_graph_limits()` reads only
+`AGENT_MAX_ITERATIONS` and `LANGGRAPH_RECURSION_LIMIT`.
+
+This separation lets an offline test inject a scripted model and exercise the
+real graph without requiring or pretending to use a live API credential.
+
+### `agent_node`
+
+The agent node logs prompt setup once, enforces the model-iteration limit, calls the bound model, validates checkpoint labels on tool-planning responses, and then does one of two things:
+
+1. returns the model's `AIMessage` containing one tool call; or
+2. extracts and validates `FinalVerdict`, queues a safe final assessment, and stores the verdict in state.
+
+### `tools_node`
+
+The tools node verifies:
+
+- the requested name is in the five-tool registry;
+- exactly one tool was requested;
+- tool `customer_id` equals the alert customer;
+- transaction dates exactly equal the alert observation window;
+- the same tool/argument combination was not already executed.
+
+It logs `TOOL_CALLED`, invokes the wrapper, catches errors as safe structured results, logs `TOOL_RESULT`, stores the result in state, and creates a `ToolMessage` linked to the original tool-call ID.
+
+### Stopping controls
+
+`AGENT_MAX_ITERATIONS` limits model calls, while LangGraph's `recursion_limit` limits graph super-steps. These are separate protections: the first expresses application policy and the second prevents an accidental graph loop.
+
+### Phase 5 offline tests
+
+No Groq request was needed for structural testing. A scripted model requested a real transaction tool, received actual bounded SQLite evidence, and then returned a schema-valid verdict.
+
+Verified result:
+
+```text
+final verdict: TRUE_POSITIVE
+confidence: 0.72
+tool results stored: 1
+important transactions returned: 12
+agent iterations: 2
+```
+
+Verified stream/audit queue order:
+
+```text
+system_prompt_built
+analysis_summary
+tool_call
+tool_result
+analysis_summary
+verdict
+```
+
+Boundary tests proved that only the five intended argument schemas are exposed, a different customer ID is blocked, a different observation window is blocked, and an invalid structured verdict is rejected.
+
+### How to test
+
+```powershell
+cd C:\Users\hp\Desktop\mini-SAR\mini-sar
+python -m compileall app\agent app\tools
+```
+
+Expected result: all Phase 5 modules compile. A live model test additionally
+requires copying `.env.example` to `.env`, setting a real `GROQ_API_KEY`, and
+selecting a `GROQ_MODEL` available in your Groq account. Secrets must never be
+committed.
+
+---
+
+## Phase 5 setup correction — Groq and VS Code imports
+
+### Why this correction was needed
+
+The first Phase 5 version used `ChatOpenAI` and an OpenAI-specific hardcoded
+default. That did not match the intended runtime. The project now deliberately
+supports one provider—Groq—so the interview story and the implementation stay
+small and consistent.
+
+Hardcoding a model is undesirable because availability, capability, limits, and
+account access can change independently of the source code. Environment
+configuration separates these deployment choices from application behavior.
+The `.env.example` file documents the names, while the ignored `.env` stores the
+real local key.
+
+Pylance import errors commonly occur when VS Code analyzes the project with a
+different Python interpreter from the terminal. Installing a package globally,
+in another virtual environment, or in an unselected Conda environment does not
+make it visible to the selected VS Code interpreter.
+
+### Files changed
+
+| File | Correction |
+| --- | --- |
+| `app/agent/llm.py` | Replaced `ChatOpenAI` with `ChatGroq`; added strict Groq-only environment validation; removed every hardcoded model. |
+| `app/agent/graph.py` | Corrected the provider description and loads credential-free graph limits for offline tests. |
+| `requirements.txt` | Replaced `langchain-openai` with `langchain-groq` and explicitly listed directly imported `langchain-core`. |
+| `.env.example` | Added `LLM_PROVIDER`, `GROQ_API_KEY`, and `GROQ_MODEL`. |
+| `.vscode/settings.json` | Added the workspace import root and project-local virtual-environment path. |
+
+The package markers already existed at `app/__init__.py`,
+`app/agent/__init__.py`, `app/tools/__init__.py`, and
+`app/audit/__init__.py`. `app/static` contains browser assets, not Python
+modules, so it does not need `__init__.py`.
+
+### Create and activate the environment on Windows PowerShell
+
+Open `C:\Users\hp\Desktop\mini-SAR\mini-sar` as the VS Code folder, then run:
+
+```powershell
+cd C:\Users\hp\Desktop\mini-SAR\mini-sar
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+After activation, the prompt normally starts with `(.venv)`. Verify which
+interpreter PowerShell is using:
+
+```powershell
+python -c "import sys; print(sys.executable)"
+```
+
+Expected path:
+
+```text
+C:\Users\hp\Desktop\mini-SAR\mini-sar\.venv\Scripts\python.exe
+```
+
+If PowerShell blocks `Activate.ps1`, allow scripts only for the current shell
+session and retry activation:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\.venv\Scripts\Activate.ps1
+```
+
+This does not change the permanent machine or user execution policy.
+
+### Select the VS Code interpreter
+
+1. Open the `mini-sar` folder itself in VS Code.
+2. Press `Ctrl+Shift+P`.
+3. Run `Python: Select Interpreter`.
+4. Choose `.venv\Scripts\python.exe`.
+5. If diagnostics remain stale, run `Developer: Reload Window`.
+
+`python.defaultInterpreterPath` gives a new workspace the expected `.venv`
+location. The explicit interpreter selection remains the authoritative VS Code
+choice. `python.analysis.extraPaths: ["./"]` tells Pylance that the opened
+project root contains the `app` package.
+
+### Verify imports
+
+With the virtual environment active:
+
+```powershell
+python -c "import langchain_core, langgraph, langchain_groq, dotenv, pydantic; from langchain_groq import ChatGroq; print('All imports OK:', ChatGroq.__name__)"
+python -m pip check
+python -m compileall -q app
+```
+
+Expected output:
+
+```text
+All imports OK: ChatGroq
+No broken requirements found.
+```
+
+`compileall -q` is silent on success. It checks Python syntax but does not call
+Groq.
+
+### Configure a live model
+
+Create the ignored `.env` file:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+Then replace only the placeholder key and choose a model currently available in
+your Groq account:
+
+```env
+LLM_PROVIDER=groq
+GROQ_API_KEY=your_real_key_here
+GROQ_MODEL=llama-3.1-8b-instant
+```
+
+The model shown here is configuration, not a Python default. It can be replaced
+without changing application code.
+
+### Interview question this correction answers
+
+> “How do you keep an agent portable and secure across model deployments?”
+
+Answer: the graph depends on LangChain message/tool interfaces, while the
+provider adapter is isolated in `llm.py`. Provider, credential, and model are
+validated environment configuration; secrets and deployment choices are not
+hardcoded. A project-local virtual environment makes the runtime reproducible,
+and Pydantic still validates the final verdict independently of the model.
+
+### Interview explanation
+
+> “I used LangGraph to make the investigation loop explicit: the agent can request one allow-listed tool, the tools node enforces customer and date-window scope, and the result returns as a ToolMessage. Python calculates the AML signals, while the model only interprets evidence. The graph stops only on a Pydantic-validated verdict, has iteration and recursion limits, and emits safe structured summaries rather than chain-of-thought.”

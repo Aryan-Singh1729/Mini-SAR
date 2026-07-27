@@ -23,7 +23,7 @@ The LLM will never receive database credentials or SQL execution capability. It 
 | SQLite (`sqlite3`) | Local relational database | A zero-infrastructure, auditable data store that still demonstrates real SQL data modeling. |
 | LangChain | Tool and message abstractions | Provides a standard way to describe controlled functions as LLM-callable tools. |
 | LangGraph | Investigation state machine | Makes the agent/tool loop, state, and stop condition explicit and easy to explain in an interview. |
-| OpenAI-compatible chat model via LangChain | Evidence interpretation | Produces the investigation summaries and final JSON verdict, constrained to tool evidence. The provider/model is configurable through environment variables. |
+| Groq-hosted open model through LangChain `ChatGroq` | Evidence interpretation | Produces investigation summaries and the final JSON verdict constrained to tool evidence. Provider, API key, and model are read from environment variables. |
 | Server-Sent Events (SSE) | Live investigation updates | Streams one-way, ordered browser updates over standard HTTP without a WebSocket frontend. |
 | Pydantic | Request, response, and verdict validation | Ensures alerts, human reviews, and final verdicts have predictable shapes. |
 | Plain HTML/JavaScript | Minimal demo UI | Keeps the focus on backend architecture while showing a live SSE investigation. |
@@ -357,7 +357,8 @@ Interview question: “What would an auditor be able to reconstruct after an aut
 
 Create typed graph state, prompt, LLM setup, allow-listed dispatch, conditional routing, verdict validation, and graph smoke test. Model configuration stays in environment variables. We will include a clear behavior when an API key/provider is unavailable rather than hiding the dependency.
 
-Test command: documented graph test after setting `OPENAI_API_KEY` and model variables.
+Test command: documented graph test after setting `LLM_PROVIDER=groq`,
+`GROQ_API_KEY`, and a `GROQ_MODEL` available in the user's Groq account.
 
 Expected result: a sequence of controlled tool calls ending in schema-valid JSON; the model cannot request arbitrary database operations.
 
