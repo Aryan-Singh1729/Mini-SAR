@@ -819,3 +819,97 @@ Expected result: five JSON-ready dictionaries; transaction output must contain n
 ### Interview explanation
 
 > “I gave the future agent five narrowly scoped Python tools rather than database access. Each tool uses fixed, parameterized SQL and returns bounded evidence. Risk signals such as structuring, rapid movement, and income mismatch are deterministic Python calculations with documented thresholds. The LLM will only interpret those outputs, which reduces hallucination and makes every conclusion auditable.”
+---
+
+## Phase 4 — Audit logger and evidence package
+
+### Goal
+
+Phase 4 creates a durable investigation history and one self-contained evidence JSON file per completed run. It records safe operational facts—tool calls, tool results, summaries, verdicts, and later human reviews—not private LLM chain-of-thought.
+
+### Files created
+
+| File | Purpose |
+| --- | --- |
+| `app/audit/audit_logger.py` | Creates runs, appends ordered events, completes/fails a run, and retrieves audit records. |
+| `app/audit/evidence_builder.py` | Builds and atomically saves evidence packages. |
+
+### Audit lifecycle
+
+```text
+Alert accepted
+  -> create_investigation_run()
+  -> INVESTIGATION_STARTED event, sequence 1
+  -> TOOL_CALLED / TOOL_RESULT / ANALYSIS_SUMMARY events
+  -> complete_investigation_run()
+  -> VERDICT_FINALIZED event
+  -> save_evidence_package()
+  -> EVIDENCE_PACKAGE_SAVED event
+```
+
+`audit_runs` stores one row per investigation: investigation ID, alert ID, customer ID, start/completion times, status, verdict, confidence, provider, and model name.
+
+`audit_events` stores the ordered details: event ID, investigation ID, sequence number, event type, UTC timestamp, and JSON payload. The unique `(investigation_id, sequence_number)` pair makes the order durable even if timestamps are close together.
+
+### `audit_logger.py`
+
+`create_investigation_run()` generates an `INV-...` ID unless a controlled test ID is supplied, inserts a `RUNNING` record, and writes `INVESTIGATION_STARTED`. The customer ID is a foreign key, so a run cannot be created for an unknown customer. The alert ID remains plain text because a later submitted alert might not exist in the historical-alert table.
+
+`append_audit_event()` verifies that the run exists, starts a SQLite immediate transaction, calculates the next sequence number, serializes a safe caller-provided payload to JSON, and writes the event. A tool event should contain a short summary such as transaction count or signal result—not private model reasoning.
+
+`complete_investigation_run()` accepts only `TRUE_POSITIVE` or `FALSE_POSITIVE` and a confidence from 0 to 1. It changes the run to `COMPLETED` and logs `VERDICT_FINALIZED`. `fail_investigation_run()` marks a running record as `FAILED` and logs only a safe error summary, never a traceback or secret.
+
+An important SQLite lesson: a connection context manager commits or rolls back but does not automatically guarantee closure. The internal `_audit_connection()` helper therefore always commits on success, rolls back on error, and closes the database connection. This prevents old audit connections from holding write locks.
+
+### `evidence_builder.py`
+
+The final evidence JSON contains:
+
+```text
+investigation ID and generation time
+audit-run metadata
+original alert
+all tool outputs actually used
+final verdict
+key evidence
+false-positive factors considered
+chronological audit events
+```
+
+The file is saved to `audit/evidence_logs/{investigation_id}.json`. `_atomic_json_write()` writes a temporary file first and then uses `os.replace()` to avoid leaving a half-written JSON file after interruption.
+
+The builder writes twice for an important reason:
+
+1. it atomically creates the initial evidence file;
+2. it logs `EVIDENCE_PACKAGE_SAVED` only after that file exists;
+3. it rebuilds and atomically rewrites the package so the final file includes its own save event.
+
+### Phase 4 test
+
+A labelled structural test used `TEST-PHASE4-AUDIT`, an actual imported customer/alert, and a clearly marked test-only verdict. It was not treated as an AML decision.
+
+The verified event order was:
+
+```text
+1 INVESTIGATION_STARTED
+2 TOOL_CALLED
+3 TOOL_RESULT
+4 ANALYSIS_SUMMARY
+5 VERDICT_FINALIZED
+6 EVIDENCE_PACKAGE_SAVED
+```
+
+The evidence JSON existed, contained all six events, and contained the original alert. Afterwards, the exact test run, its events, and its test evidence file were removed. Imported AML data was not changed.
+
+### How to test
+
+```powershell
+cd C:\Users\hp\Desktop\mini-SAR\mini-sar
+python -m compileall app\audit
+```
+
+Expected result: `audit_logger.py` and `evidence_builder.py` compile. A repeat lifecycle test should use a unique `TEST-...` ID and remove only that exact run, its events, and evidence file after verification.
+
+### Interview explanation
+
+> “Every investigation receives a durable run record and ordered audit events. I store safe operational evidence rather than hidden model reasoning. Once complete, the system atomically writes an evidence package containing the original alert, actual tool outputs, final verdict, false-positive factors, and chronology, so an auditor can reconstruct what happened.”
