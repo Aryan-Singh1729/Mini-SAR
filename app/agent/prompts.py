@@ -6,7 +6,7 @@ import json
 from typing import Any
 
 
-PROMPT_VERSION = "aml-investigator-v1"
+PROMPT_VERSION = "aml-investigator-v2"
 
 
 def build_system_prompt() -> str:
@@ -29,7 +29,9 @@ TOOL POLICY
 - For transaction history, use the exact observation_start and observation_end in the alert.
 - Request at most one tool per turn.
 - Do not repeat a tool call with the same arguments.
-- Stop calling tools once the evidence is sufficient for a verdict.
+- Before finalizing, call each supplied investigation tool exactly once so the
+  verdict covers customer, account, transaction, prior-alert, and watchlist evidence.
+- Stop calling tools after the required evidence checklist is complete.
 
 VISIBLE CHECKPOINT FORMAT
 - Before the first tool call, the assistant content must contain:
@@ -42,7 +44,8 @@ VISIBLE CHECKPOINT FORMAT
 - These are concise summaries, not private reasoning traces.
 
 FINAL OUTPUT
-- When evidence is sufficient, stop calling tools and return the provider-enforced structured verdict.
+- When the evidence checklist is complete, stop calling tools and return only one JSON object.
+- Do not wrap the final JSON in commentary or Markdown fences.
 - verdict must be TRUE_POSITIVE or FALSE_POSITIVE.
 - confidence must be from 0 to 1.
 - rules_triggered may contain only RULE-01, RULE-02, RULE-03, and RULE-04.

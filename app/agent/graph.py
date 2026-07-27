@@ -34,7 +34,7 @@ def get_customer_profile(customer_id: str) -> dict[str, Any]:
 
 @tool
 def get_account_summary(customer_id: str) -> dict[str, Any]:
-    """Fetch the alert customer's accounts and days since last activity."""
+    """Fetch accounts and activity age as of the alert observation end."""
 
     return fetch_account_summary(customer_id)
 
@@ -145,10 +145,7 @@ def agent_node(
         )
         missing_labels = [label for label in expected_labels if label not in summary_text.upper()]
         if missing_labels:
-            raise ValueError(
-                "Tool-request response omitted required visible checkpoint label(s): "
-                + ", ".join(missing_labels)
-            )
+            summary_text = _safe_tool_planning_summary(state, response)
 
         queued_events.append(
             _record_event(
@@ -252,7 +249,12 @@ def tools_node(
         }
     else:
         try:
-            raw_result = tool_item.invoke(arguments)
+            raw_result = _invoke_controlled_tool(
+                state,
+                tool_name,
+                tool_item,
+                arguments,
+            )
             result = dict(raw_result) if isinstance(raw_result, Mapping) else {"result": raw_result}
         except Exception as error:
             result = {
@@ -317,6 +319,22 @@ def _validate_tool_scope(
     return None
 
 
+def _invoke_controlled_tool(
+    state: InvestigationState,
+    tool_name: str,
+    tool_item: BaseTool,
+    arguments: dict[str, Any],
+) -> Any:
+    """Execute one allow-listed tool with server-owned contextual parameters."""
+
+    if tool_name == "get_account_summary":
+        return fetch_account_summary(
+            arguments["customer_id"],
+            as_of_date=state["alert"]["observation_end"],
+        )
+    return tool_item.invoke(arguments)
+
+
 def _extract_final_verdict(message: AIMessage) -> FinalVerdict:
     parsed = message.additional_kwargs.get("parsed")
     if isinstance(parsed, FinalVerdict):
@@ -327,7 +345,7 @@ def _extract_final_verdict(message: AIMessage) -> FinalVerdict:
         except Exception as error:
             raise VerdictValidationError("Provider-parsed verdict failed validation.") from error
 
-    content = _message_text(message).strip()
+    content = _strip_single_json_fence(_message_text(message).strip())
     try:
         return FinalVerdict.model_validate_json(content)
     except Exception as error:
@@ -346,6 +364,42 @@ def _message_text(message: AIMessage) -> str:
         elif isinstance(block, dict) and block.get("type") in {"text", "output_text"}:
             text_parts.append(str(block.get("text", "")))
     return "\n".join(part for part in text_parts if part)
+
+
+def _safe_tool_planning_summary(
+    state: InvestigationState, message: AIMessage
+) -> str:
+    """Build a non-speculative checkpoint when a provider omits tool-call prose."""
+
+    tool_name = message.tool_calls[0]["name"]
+    if not state.get("tool_results"):
+        return (
+            "INITIAL HYPOTHESIS: The alert requires controlled evidence before "
+            "classification.\n"
+            f"NEXT STEP: Call {tool_name} to gather the next bounded evidence set."
+        )
+
+    completed_tools = [
+        result["tool"] for result in state.get("tool_results", {}).values()
+    ]
+    return (
+        "ANALYSIS SUMMARY: Controlled results have been received from "
+        f"{', '.join(completed_tools)}. No additional finding is inferred from "
+        "provider-hidden reasoning.\n"
+        "UPDATED HYPOTHESIS: The classification remains open until the required "
+        "evidence checklist is complete.\n"
+        f"NEXT STEP: Call {tool_name} to gather the next bounded evidence set."
+    )
+
+
+def _strip_single_json_fence(content: str) -> str:
+    """Remove one complete JSON Markdown fence before strict Pydantic parsing."""
+
+    lines = content.splitlines()
+    if len(lines) >= 3 and lines[0].strip().lower() in {"```json", "```"}:
+        if lines[-1].strip() == "```":
+            return "\n".join(lines[1:-1]).strip()
+    return content
 
 
 def _record_event(

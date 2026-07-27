@@ -33,7 +33,7 @@ The project will use no vector database and no retrieval-augmented generation. T
 ## 3. Target folder structure
 
 ```text
-mini-sar-investigator/
+mini-SAR/
 ├── implementation.md              # This plan and phase-by-phase learning guide
 ├── app/
 │   ├── api.py                     # FastAPI application, routes, and SSE orchestration
@@ -286,7 +286,7 @@ Deliverable: this `implementation.md` only.
 Test command (PowerShell):
 
 ```powershell
-Get-Content .\mini-sar-investigator\implementation.md
+Get-Content C:\Users\hp\Desktop\mini-SAR\implementation.md
 ```
 
 Expected result: the complete plan rendered as text, with no `app/`, database, or runnable application files yet.
@@ -297,7 +297,7 @@ Interview question this prepares: “How would you design an auditable agentic A
 
 Create the required directories, `requirements.txt`, `.env.example`, and Python package markers if needed for imports. No business logic yet.
 
-Test command: `Get-ChildItem -Recurse .\mini-sar-investigator`
+Test command: `Get-ChildItem -Recurse C:\Users\hp\Desktop\mini-SAR`
 
 Expected result: the target skeleton matches the requested architecture, and configuration contains placeholders only.
 
@@ -327,7 +327,7 @@ Interview question: “How did you adapt a relational model to heterogeneous sou
 
 Create `import_data.py`, `validate_dataset.py`, and `schema_mapper.py` only if mapping is necessary. The importer will load the supplied CSV/Excel files using parameterized SQL, transaction handling, and clear errors. The validator will report row counts, missing values, duplicate identifiers, invalid dates, and foreign-key consistency, plus any rule-critical data gaps.
 
-Test commands: `python -m app.import_data` followed by `python -m app.validate_dataset` (run from `mini-sar-investigator`, with the dataset path supplied through the documented configuration).
+Test commands: `python -m app.import_data` followed by `python -m app.validate_dataset` (run from `C:\Users\hp\Desktop\mini-SAR`, with the dataset path supplied through the documented configuration).
 
 Expected result: a SQLite database sourced solely from the provided files, followed by concise per-table validation summaries and a non-zero/clear failure for serious integrity errors.
 
@@ -363,6 +363,29 @@ Test command: documented graph test after setting `LLM_PROVIDER=groq`,
 Expected result: a sequence of controlled tool calls ending in schema-valid JSON; the model cannot request arbitrary database operations.
 
 Interview question: “Why use LangGraph instead of a single LLM call, and how do you stop the loop safely?”
+
+### Intermediate Phase 5 checkpoint — Agent classification validation
+
+Before Phase 6, add test-only routes `/test-model`, `/test-alerts`, and
+`/test-investigate` plus a minimal browser page. Use two server-owned fixtures
+that reference existing dataset customers and transaction windows. Keep the
+expected label outside the model alert, require all five controlled tools,
+validate the terminal verdict with Pydantic, and report expected/actual
+mismatches without hiding them.
+
+This checkpoint returns an ordered JSON event list. It intentionally does not
+implement the Phase 6 SSE stream, durable investigation lifecycle, or evidence
+package orchestration.
+
+Test command: `uvicorn app.api:app --reload`, then open
+`http://127.0.0.1:8000/`.
+
+Expected result: the Groq probe returns `MODEL_CONNECTED`; both test cases show
+five controlled tool calls/results, visible summaries, final JSON, and an
+explicit verdict match or mismatch.
+
+Interview question: “How did you test model/tool orchestration independently
+before adding production streaming and audit endpoints?”
 
 ### Phase 6 — FastAPI investigation endpoint and SSE
 

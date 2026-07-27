@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Mini AML SAR Investigator — Agent Test</title>
+    <style>
+        :root {
+            color-scheme: light;
+            font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            color: #172033;
+            background: #f3f6fb;
+        }
+        * { box-sizing: border-box; }
+        body { margin: 0; padding: 2rem 1rem; }
+        main {
+            max-width: 980px;
+            margin: 0 auto;
+            background: white;
+            border: 1px solid #dce3ef;
+            border-radius: 14px;
+            padding: 1.5rem;
+            box-shadow: 0 12px 35px rgba(33, 48, 75, 0.08);
+        }
+        h1 { margin-top: 0; font-size: 1.65rem; }
+        .note { color: #58657a; line-height: 1.5; }
+        .controls {
+            display: grid;
+            grid-template-columns: auto minmax(260px, 1fr) auto;
+            gap: 0.75rem;
+            margin: 1.25rem 0;
+        }
+        button, select {
+            min-height: 42px;
+            border: 1px solid #aeb9ca;
+            border-radius: 8px;
+            padding: 0.6rem 0.85rem;
+            background: white;
+            font: inherit;
+        }
+        button {
+            cursor: pointer;
+            border-color: #2357c6;
+            background: #2357c6;
+            color: white;
+            font-weight: 650;
+        }
+        button:disabled { opacity: 0.55; cursor: wait; }
+        h2 { font-size: 1.05rem; margin-top: 1.5rem; }
+        #status {
+            min-height: 1.5rem;
+            font-weight: 650;
+        }
+        .success { color: #137333; }
+        .failure { color: #b3261e; }
+        #events {
+            min-height: 180px;
+            max-height: 520px;
+            overflow: auto;
+            border: 1px solid #dce3ef;
+            border-radius: 10px;
+            background: #f8faff;
+            padding: 0.75rem;
+        }
+        .event {
+            border-left: 4px solid #7895d1;
+            background: white;
+            margin-bottom: 0.65rem;
+            padding: 0.65rem 0.75rem;
+            border-radius: 5px;
+        }
+        .event strong {
+            display: block;
+            color: #23437f;
+            margin-bottom: 0.35rem;
+        }
+        pre {
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+            margin: 0.45rem 0 0;
+            background: #101828;
+            color: #e6edf7;
+            border-radius: 8px;
+            padding: 0.8rem;
+            overflow: auto;
+        }
+        #verdict { min-height: 90px; }
+        @media (max-width: 760px) {
+            .controls { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+<main>
+    <h1>Mini AML SAR Investigator — Agent Test</h1>
+    <p class="note">
+        Intermediate Phase 5 checkpoint. The page displays controlled tool evidence
+        and safe investigator summaries, never private chain-of-thought.
+    </p>
+
+    <div class="controls">
+        <button id="test-model" type="button">Test Model Connection</button>
+        <select id="alert-select" aria-label="Select test alert">
+            <option value="">Loading test alerts…</option>
+        </select>
+        <button id="run-investigation" type="button" disabled>Run Investigation</button>
+    </div>
+
+    <div id="status" role="status" aria-live="polite"></div>
+
+    <h2>Ordered visible events</h2>
+    <div id="events" aria-live="polite"></div>
+
+    <h2>Final verdict JSON</h2>
+    <pre id="verdict">No investigation has run yet.</pre>
+</main>
+
+<script>
+    const modelButton = document.querySelector("#test-model");
+    const investigateButton = document.querySelector("#run-investigation");
+    const alertSelect = document.querySelector("#alert-select");
+    const eventsPanel = document.querySelector("#events");
+    const verdictPanel = document.querySelector("#verdict");
+    const statusPanel = document.querySelector("#status");
+
+    let fixtures = new Map();
+    let modelConnection = null;
+
+    function appendEvent(event) {
+        const wrapper = document.createElement("div");
+        wrapper.className = "event";
+
+        const title = document.createElement("strong");
+        const sequence = event.sequence_number ? `${event.sequence_number}. ` : "";
+        title.textContent = `${sequence}${event.event_type}`;
+
+        const message = document.createElement("div");
+        message.textContent = event.message || "";
+
+        wrapper.append(title, message);
+        if (event.payload && Object.keys(event.payload).length > 0) {
+            const payload = document.createElement("pre");
+            payload.textContent = JSON.stringify(event.payload, null, 2);
+            wrapper.append(payload);
+        }
+        eventsPanel.append(wrapper);
+        eventsPanel.scrollTop = eventsPanel.scrollHeight;
+    }
+
+    function setStatus(message, successful = null) {
+        statusPanel.textContent = message;
+        statusPanel.className = successful === true
+            ? "success"
+            : successful === false
+                ? "failure"
+                : "";
+    }
+
+    async function loadAlerts() {
+        try {
+            const response = await fetch("/test-alerts");
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.error || "Unable to load test alerts.");
+
+            fixtures = new Map(data.fixtures.map(item => [item.fixture_id, item]));
+            alertSelect.replaceChildren();
+            for (const fixture of data.fixtures) {
+                const option = document.createElement("option");
+                option.value = fixture.fixture_id;
+                option.textContent = fixture.label;
+                alertSelect.append(option);
+            }
+            investigateButton.disabled = data.fixtures.length === 0;
+            setStatus("Two dataset-backed test alerts are ready.");
+        } catch (error) {
+            alertSelect.innerHTML = "<option value=''>Test alerts unavailable</option>";
+            setStatus(error.message, false);
+        }
+    }
+
+    modelButton.addEventListener("click", async () => {
+        eventsPanel.replaceChildren();
+        verdictPanel.textContent = "No investigation has run yet.";
+        setStatus("Testing Groq model connection…");
+        modelButton.disabled = true;
+        appendEvent({
+            event_type: "model_connection_started",
+            message: "Sending the minimal MODEL_CONNECTED probe.",
+            payload: {}
+        });
+
+        try {
+            const response = await fetch("/test-model");
+            const data = await response.json();
+            modelConnection = data;
+            eventsPanel.replaceChildren();
+            for (const event of data.events || []) appendEvent(event);
+            if (!response.ok || data.status !== "success") {
+                throw new Error(data.error || "Model connection failed.");
+            }
+            setStatus(`Connected to ${data.provider} / ${data.model}.`, true);
+        } catch (error) {
+            setStatus(error.message, false);
+        } finally {
+            modelButton.disabled = false;
+        }
+    });
+
+    alertSelect.addEventListener("change", () => {
+        const fixture = fixtures.get(alertSelect.value);
+        if (fixture) {
+            setStatus(`Selected ${fixture.label}.`);
+        }
+    });
+
+    investigateButton.addEventListener("click", async () => {
+        const fixture = fixtures.get(alertSelect.value);
+        if (!fixture) return;
+
+        eventsPanel.replaceChildren();
+        verdictPanel.textContent = "Investigation running…";
+        setStatus(`Running ${fixture.label}…`);
+        investigateButton.disabled = true;
+        modelButton.disabled = true;
+
+        if (modelConnection?.status === "success") {
+            appendEvent({
+                event_type: "model_connection_success",
+                message: `Previously connected to ${modelConnection.provider} / ${modelConnection.model}.`,
+                payload: { response: modelConnection.response }
+            });
+        }
+        appendEvent({
+            event_type: "alert_selected",
+            message: fixture.label,
+            payload: {
+                expected_verdict: fixture.expected_verdict,
+                alert: fixture.alert
+            }
+        });
+
+        try {
+            const response = await fetch("/test-investigate", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ fixture_id: fixture.fixture_id })
+            });
+            const data = await response.json();
+            for (const event of data.events || []) appendEvent(event);
+            verdictPanel.textContent = JSON.stringify(data.final_verdict, null, 2);
+
+            if (!response.ok) {
+                throw new Error(
+                    data.possible_reason_for_mismatch || "Investigation failed."
+                );
+            }
+            const matchText = data.matched_expected
+                ? "MATCH"
+                : "MISMATCH";
+            setStatus(
+                `${matchText}: expected ${data.expected_verdict}, actual ${data.actual_verdict}.`,
+                data.matched_expected
+            );
+            if (!data.matched_expected && data.possible_reason_for_mismatch) {
+                appendEvent({
+                    event_type: "mismatch_explanation",
+                    message: data.possible_reason_for_mismatch,
+                    payload: {}
+                });
+            }
+        } catch (error) {
+            setStatus(error.message, false);
+        } finally {
+            investigateButton.disabled = false;
+            modelButton.disabled = false;
+        }
+    });
+
+    loadAlerts();
+</script>
+</body>
+</html>

@@ -69,17 +69,23 @@ def load_graph_limits() -> GraphLimits:
     )
 
 
-def build_bound_model(tools: Sequence[BaseTool]):
-    """Create a ChatGroq model and expose only the allow-listed local tools."""
+def build_chat_model(settings: LLMSettings | None = None) -> ChatGroq:
+    """Create the unbound Groq chat model used by probes and investigations."""
 
-    settings = load_llm_settings()
-    model = ChatGroq(
-        model=settings.model_name,
-        api_key=settings.api_key,
+    selected = settings or load_llm_settings()
+    return ChatGroq(
+        model=selected.model_name,
+        api_key=selected.api_key,
         temperature=0,
         timeout=60.0,
         max_retries=2,
     )
+
+
+def build_bound_model(tools: Sequence[BaseTool]):
+    """Create a ChatGroq model and expose only the allow-listed local tools."""
+
+    model = build_chat_model()
     return model.bind_tools(
         list(tools),
         parallel_tool_calls=False,

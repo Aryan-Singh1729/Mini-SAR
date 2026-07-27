@@ -12,6 +12,7 @@ Completed phases:
 6. Phase 4 — Audit logger and evidence package
 7. Phase 5 — LangChain and LangGraph investigation agent
 8. Phase 5 setup correction — Groq configuration and VS Code imports
+9. Phase 5 checkpoint — End-to-end Groq agent classification test
 
 The project intentionally has no generated AML customers, transactions, alerts, or watchlist entries. It is built around the CSV data supplied by the project owner.
 
@@ -138,7 +139,8 @@ SSE updates, audit events, evidence package, human review
 ### Phase 1 test
 
 ```powershell
-Get-ChildItem -Recurse -Force .\mini-sar
+cd C:\Users\hp\Desktop\mini-SAR
+Get-ChildItem -Recurse -Force .
 ```
 
 Expected result: folders, package markers, configuration files, and documentation. At the end of Phase 1 there should be no fake CSV data, no seed script, no FastAPI endpoint, and no agent code.
@@ -221,7 +223,8 @@ The complete per-column explanation is maintained in [DATA_DICTIONARY.md](DATA_D
 ### Phase 2A test
 
 ```powershell
-Get-Content .\mini-sar\DATA_DICTIONARY.md
+cd C:\Users\hp\Desktop\mini-SAR
+Get-Content .\DATA_DICTIONARY.md
 ```
 
 Expected result: source inventory, relationships, every source field, rule fitness, and data-quality limitations.
@@ -340,14 +343,14 @@ This is necessary because SQLite does not automatically enforce foreign keys for
 ### Phase 2B test
 
 ```powershell
-cd .\mini-sar
+cd C:\Users\hp\Desktop\mini-SAR
 python -m app.database
 ```
 
 Expected result:
 
 ```text
-SQLite schema initialized at: ...\mini-sar\data\aml.db
+SQLite schema initialized at: C:\Users\hp\Desktop\mini-SAR\data\aml.db
 ```
 
 The database should contain all eight tables and zero source-data rows before Phase 2C.
@@ -506,7 +509,7 @@ Transaction timestamps: 2024-01-01 08:00:00 to 2024-11-28 18:00:00
 
 ### Phase 2C tests
 
-Run these commands from `C:\Users\hp\Desktop\mini-SAR\mini-sar`.
+Run these commands from `C:\Users\hp\Desktop\mini-SAR`.
 
 Validate the source CSV files before importing:
 
@@ -793,7 +796,7 @@ Retained watchlist case → one alias match returned
 
 ### How to test Phase 3
 
-From `C:\Users\hp\Desktop\mini-SAR\mini-sar`:
+From `C:\Users\hp\Desktop\mini-SAR`:
 
 ```powershell
 python -m compileall app
@@ -910,7 +913,7 @@ The evidence JSON existed, contained all six events, and contained the original 
 ### How to test
 
 ```powershell
-cd C:\Users\hp\Desktop\mini-SAR\mini-sar
+cd C:\Users\hp\Desktop\mini-SAR
 python -m compileall app\audit
 ```
 
@@ -1114,7 +1117,7 @@ Boundary tests proved that only the five intended argument schemas are exposed, 
 ### How to test
 
 ```powershell
-cd C:\Users\hp\Desktop\mini-SAR\mini-sar
+cd C:\Users\hp\Desktop\mini-SAR
 python -m compileall app\agent app\tools
 ```
 
@@ -1162,10 +1165,10 @@ modules, so it does not need `__init__.py`.
 
 ### Create and activate the environment on Windows PowerShell
 
-Open `C:\Users\hp\Desktop\mini-SAR\mini-sar` as the VS Code folder, then run:
+Open `C:\Users\hp\Desktop\mini-SAR` as the VS Code folder, then run:
 
 ```powershell
-cd C:\Users\hp\Desktop\mini-SAR\mini-sar
+cd C:\Users\hp\Desktop\mini-SAR
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
@@ -1182,7 +1185,7 @@ python -c "import sys; print(sys.executable)"
 Expected path:
 
 ```text
-C:\Users\hp\Desktop\mini-SAR\mini-sar\.venv\Scripts\python.exe
+C:\Users\hp\Desktop\mini-SAR\.venv\Scripts\python.exe
 ```
 
 If PowerShell blocks `Activate.ps1`, allow scripts only for the current shell
@@ -1197,7 +1200,7 @@ This does not change the permanent machine or user execution policy.
 
 ### Select the VS Code interpreter
 
-1. Open the `mini-sar` folder itself in VS Code.
+1. Open the `mini-SAR` project folder itself in VS Code.
 2. Press `Ctrl+Shift+P`.
 3. Run `Python: Select Interpreter`.
 4. Choose `.venv\Scripts\python.exe`.
@@ -1261,3 +1264,316 @@ and Pydantic still validates the final verdict independently of the model.
 ### Interview explanation
 
 > “I used LangGraph to make the investigation loop explicit: the agent can request one allow-listed tool, the tools node enforces customer and date-window scope, and the result returns as a ToolMessage. Python calculates the AML signals, while the model only interprets evidence. The graph stops only on a Pydantic-validated verdict, has iteration and recursion limits, and emits safe structured summaries rather than chain-of-thought.”
+
+---
+
+## Phase 5 checkpoint — End-to-end Groq agent classification test
+
+### Goal and boundary
+
+This is an intermediate validation checkpoint, not Phase 6. It answers three
+questions before the production-style API and SSE lifecycle are added:
+
+1. Can the application authenticate to the configured Groq model?
+2. Can the LangGraph agent gather evidence through all five controlled tools?
+3. Does the Pydantic-validated verdict match an evidence-backed expected label?
+
+The checkpoint uses normal JSON for `/test-investigate`. The browser shows the
+returned events in order after the request completes. True SSE streaming,
+durable audit-run creation, evidence-file saving, audit retrieval, and human
+review remain later phases.
+
+Checkpoint runs use `persist_audit=False`. This prevents repeated model
+experiments from being confused with completed audited investigations.
+
+### Files created or changed
+
+| File | What changed and why |
+| --- | --- |
+| `app/api.py` | Added the temporary test API, server-owned fixture registry, safe event translation, expected/actual comparison, and mismatch reporting. |
+| `app/static/index.html` | Added the minimal model-test and two-alert browser interface. |
+| `app/agent/llm.py` | Added `build_chat_model()` so `/test-model` can probe Groq without binding investigation tools. |
+| `app/agent/prompts.py` | Requires all five evidence tools once and corrects the final-output instruction for Groq JSON plus Pydantic validation. |
+| `app/agent/graph.py` | Adds safe visible-summary fallback for tool calls with empty prose and strict handling of one complete JSON code fence. |
+| `Phases.md` | Documents the checkpoint, data basis, flow, tests, and interview explanation. |
+
+No database row was added or changed.
+
+### Dataset-backed test fixtures
+
+The test alert IDs are clearly marked fixture identifiers. They exist only in
+Python memory and are never inserted into SQLite. The referenced customers,
+profiles, transactions, prior alerts, counterparties, and watchlist rows all
+come from the imported user-provided dataset.
+
+#### Expected true positive
+
+```text
+fixture_id: true_positive
+customer_id: CUST-UK-004821
+window: 2024-11-07 through 2024-11-14
+expected verdict: TRUE_POSITIVE
+```
+
+The controlled tools found:
+
+- 22 credits between £8,000 and £10,000 in the structuring window;
+- deterministic `structuring_presignal = true`;
+- deterministic `rapid_outflow_detected = true`;
+- deterministic `income_mismatch = true`;
+- declared annual income of £22,000;
+- an alias match between an existing counterparty and an active sanctions
+  watchlist entry.
+
+#### Expected false positive
+
+```text
+fixture_id: false_positive
+customer_id: CUST-UK-050012
+window: 2024-10-01 through 2024-10-31
+expected verdict: FALSE_POSITIVE
+```
+
+The controlled tools found:
+
+- declared annual income of £90,000;
+- ordinary monthly activity in the selected October window;
+- no structuring pre-signal;
+- no rapid-outflow pre-signal;
+- no income-mismatch pre-signal;
+- no watchlist match;
+- an existing prior alert disposed as false positive.
+
+The expected verdict is stored beside each server fixture but is removed before
+the alert is passed to LangGraph. The model receives the alert and must discover
+the evidence through tools; it does not receive the answer key.
+
+These labels are checkpoint expectations, not regulatory ground-truth
+certification. A mismatch is useful test evidence and is never hidden.
+
+### `GET /test-model`
+
+This endpoint:
+
+1. loads `LLM_PROVIDER`, `GROQ_API_KEY`, and `GROQ_MODEL`;
+2. creates an unbound `ChatGroq` instance;
+3. sends `Reply with only: MODEL_CONNECTED`;
+4. strips surrounding whitespace;
+5. reports success only if the content is exactly `MODEL_CONNECTED`.
+
+No investigation tools are supplied to this probe. The API key is never
+returned. Configuration, authentication, rate-limit, and unsupported-model
+errors are converted to concise browser-safe messages.
+
+Successful shape:
+
+```json
+{
+  "status": "success",
+  "model": "value from GROQ_MODEL",
+  "provider": "groq",
+  "response": "MODEL_CONNECTED",
+  "events": []
+}
+```
+
+### `GET /test-alerts`
+
+This route returns both fixture descriptions. Before returning them, it verifies
+that each customer exists and that the configured observation window contains
+transactions.
+
+The frontend displays the expected labels because selecting a labeled test case
+is the purpose of this benchmark. The POST route accepts only `fixture_id`, so a
+browser cannot replace the expected verdict or alter customer/date scope.
+
+### `POST /test-investigate`
+
+Request:
+
+```json
+{
+  "fixture_id": "true_positive"
+}
+```
+
+Data flow:
+
+```text
+fixture_id
+  -> server-owned fixture lookup
+  -> expected label kept outside model alert
+  -> create_initial_state()
+  -> LangGraph agent_node
+  -> exactly one allow-listed tool request
+  -> tools_node validates customer and observation window
+  -> controlled Python/SQLite tool
+  -> ToolMessage returned to agent
+  -> repeat until all five evidence tools are complete
+  -> terminal JSON
+  -> Pydantic FinalVerdict validation
+  -> Python expected/actual comparison
+  -> ordered JSON response
+```
+
+The endpoint additionally checks that all five tool names appear exactly once
+in `tool_results` and that none returned an error. A model that guesses the
+correct verdict without completing the evidence checklist fails the checkpoint.
+
+For `get_account_summary`, the tools node supplies the server-owned
+`observation_end` as the internal activity-age reference date. This prevents a
+historical 2024 test from being judged against today's date. The model-facing
+tool still accepts only `customer_id`, so the model cannot alter the reference
+date.
+
+### Visible events and chain-of-thought boundary
+
+The graph's safe event queue is translated into objects such as:
+
+```json
+{
+  "event_type": "tool_call",
+  "message": "TOOL_CALLED: get_transaction_history",
+  "payload": {
+    "tool": "get_transaction_history",
+    "args": {}
+  }
+}
+```
+
+The ordered output includes:
+
+```text
+investigation_started
+alert_loaded
+agent_started
+initial_hypothesis
+tool_call
+tool_result
+analysis_summary
+verdict
+verdict_match_check
+investigation_completed
+```
+
+Groq provider reasoning fields are not read, returned, or stored. Only ordinary
+assistant content explicitly formatted as investigator-facing checkpoints is
+shown.
+
+Some tool-calling models return a valid tool call with empty assistant content.
+In that case, Python creates a conservative checkpoint stating only which
+controlled results have been received and which tool is next. It never invents
+an evidentiary conclusion from hidden reasoning.
+
+### Verdict matching
+
+Python performs:
+
+```python
+matched_expected = actual_verdict == expected_verdict
+```
+
+If the labels differ, the response preserves:
+
+- `expected_verdict`;
+- `actual_verdict`;
+- `matched_expected: false`;
+- the complete visible event sequence;
+- the final validated JSON;
+- a limited possible-reason message.
+
+The possible-reason logic first checks for tool errors and missing tools. If all
+tools completed, it states only that model interpretation differed and directs
+the investigator to the visible summaries, tool evidence, and
+`final_reasoning`. It does not claim access to an unobserved cause.
+
+### Minimal frontend behavior
+
+The page contains:
+
+- heading `Mini AML SAR Investigator — Agent Test`;
+- `Test Model Connection` button;
+- two-option alert dropdown;
+- `Run Investigation` button;
+- ordered event panel;
+- final verdict JSON panel;
+- explicit match/mismatch status.
+
+JavaScript uses `textContent` when rendering model/tool data rather than
+inserting it as HTML. This prevents returned strings from becoming executable
+page markup.
+
+### How to run
+
+```powershell
+cd C:\Users\hp\Desktop\mini-SAR
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+Copy-Item .env.example .env
+```
+
+Edit `.env` and replace the placeholder with a real Groq key. Then:
+
+```powershell
+uvicorn app.api:app --reload
+```
+
+Open:
+
+```text
+http://127.0.0.1:8000/
+```
+
+Expected manual sequence:
+
+1. Click `Test Model Connection`.
+2. Confirm `MODEL_CONNECTED`.
+3. Select `TRUE_POSITIVE test alert`.
+4. Click `Run Investigation`.
+5. Review five tool calls, five bounded results, summaries, and verdict match.
+6. Select `FALSE_POSITIVE test alert` and repeat.
+
+### Optional API-only tests
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8000/test-model |
+    ConvertTo-Json -Depth 10
+
+Invoke-RestMethod http://127.0.0.1:8000/test-alerts |
+    ConvertTo-Json -Depth 10
+
+Invoke-RestMethod `
+    -Method Post `
+    -Uri http://127.0.0.1:8000/test-investigate `
+    -ContentType "application/json" `
+    -Body '{"fixture_id":"true_positive"}' |
+    ConvertTo-Json -Depth 30
+```
+
+Replace `true_positive` with `false_positive` for the second test.
+
+### Automated verification performed
+
+An offline scripted-model integration test exercised:
+
+```text
+GET /                         -> 200 and HTML
+GET /test-model              -> 200 and MODEL_CONNECTED
+GET /test-alerts             -> 200 and two fixtures
+POST TP /test-investigate    -> 200, five calls/results, matched true
+POST FP /test-investigate    -> 200, five calls/results, matched true
+```
+
+The scripted verdicts verify routing and response construction only. They do not
+measure Groq model accuracy. A live connection was not attempted because no
+`.env` containing the user's Groq credential exists.
+
+### Interview question this checkpoint answers
+
+> “How did you validate the agent before adding production API streaming?”
+
+Answer: isolate model connectivity, tool orchestration, and verdict quality in a
+small benchmark. Use real dataset rows and deterministic tools, keep expected
+labels outside model context, require the complete evidence checklist, validate
+the terminal schema in Python, preserve mismatches, and expose safe summaries
+instead of chain-of-thought.
